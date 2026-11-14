@@ -247,7 +247,14 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    FIREBASE_CONFIG: leave null = accounts, friends and leaderboard use this site's own server database (shared across all devices).
    Paste your Firebase web config object here = accounts work on ANY device.
    AI_ENDPOINT: '/api/ai' = this site's own server (uses BACKBOARD_API_KEY or ANTHROPIC_API_KEY on Render). */
-// Import the functions you need from the SDKs you need import { initializeApp } from "firebase/app"; import { getAnalytics } from "firebase/analytics"; // TODO: Add SDKs for Firebase products that you want to use // https://firebase.google.com/docs/web/setup#available-libraries  // Your web app's Firebase configuration // For Firebase JS SDK v7.20.0 and later, measurementId is optional const firebaseConfig = {   apiKey: "AIzaSyAaU0bCJaV3sgP-prWnetL6WbOczMcxFPU",   authDomain: "rpg-hackathon.firebaseapp.com",   projectId: "rpg-hackathon",   storageBucket: "rpg-hackathon.firebasestorage.app",   messagingSenderId: "338369757247",   appId: "1:338369757247:web:8b89d06fce3aaa53bcb88a",   measurementId: "G-V890DQF3ZQ" };  // Initialize Firebase const app = initializeApp(firebaseConfig); const analytics = getAnalytics(app);
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyAaU0bCJaV3sgP-prWnetL6WbOczMcxFPU",
+  authDomain: "rpg-hackathon.firebaseapp.com",
+  projectId: "rpg-hackathon",
+  storageBucket: "rpg-hackathon.firebasestorage.app",
+  messagingSenderId: "338369757247",
+  appId: "1:338369757247:web:8b89d06fce3aaa53bcb88a"
+};
 const AI_ENDPOINT = '/api/ai';
 (function(){
 const SITE={id:'site',name:'',email:''};
@@ -317,7 +324,7 @@ function aiSample(){
   s.query=s;s.limits=async()=>({images:{maxCount:4}});return s}
 window.claude={use:async name=>{
   if(name==='user')return{me:async()=>SITE,profiles:async()=>({})};
-  if(name==='db'){if(!ready)ready=(FIREBASE_CONFIG?fireDb():serverDb().catch(e=>{console.warn('Shared database unavailable, using this device only',e);window.QL_DB={mode:'local',why:String(e&&e.message||e)};try{renderFriends()}catch(x){}return localDb()})).then(d=>db=d);return ready}
+  if(name==='db'){if(!ready)ready=(FIREBASE_CONFIG?fireDb().catch(e=>{console.warn('Firebase failed to load, trying the site database',e);return serverDb()}):serverDb().catch(e=>{console.warn('Shared database unavailable, using this device only',e);window.QL_DB={mode:'local',why:String(e&&e.message||e)};try{renderFriends()}catch(x){}return localDb()})).then(d=>db=d);return ready}
   if(name==='sample')return AI_ENDPOINT?aiSample():null;
   return null}};
 })();
