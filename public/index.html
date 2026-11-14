@@ -324,7 +324,12 @@ function aiSample(){
   s.query=s;s.limits=async()=>({images:{maxCount:4}});return s}
 window.claude={use:async name=>{
   if(name==='user')return{me:async()=>SITE,profiles:async()=>({})};
-  if(name==='db'){if(!ready)ready=(FIREBASE_CONFIG?fireDb().catch(e=>{console.warn('Firebase failed to load, trying the site database',e);return serverDb()}):serverDb().catch(e=>{console.warn('Shared database unavailable, using this device only',e);window.QL_DB={mode:'local',why:String(e&&e.message||e)};try{renderFriends()}catch(x){}return localDb()})).then(d=>db=d);return ready}
+  if(name==='db'){if(!ready){
+    const toLocal=e=>{console.warn('Shared database unavailable, using this device only',e);window.QL_DB={mode:'local',why:String(e&&e.message||e)};try{renderFriends()}catch(x){}return localDb()};
+    const viaServer=()=>serverDb().catch(toLocal);
+    const probe=async d=>{await Promise.race([d.doc('data/users/site/profiles').get(),new Promise((_,no)=>setTimeout(()=>no(new Error('Firestore did not respond in time')),8000))]);window.QL_DB={mode:'shared'};return d};
+    ready=(FIREBASE_CONFIG?fireDb().then(probe).catch(e=>{console.warn('Firebase unavailable (check Firestore rules and that the database exists). Using the site database instead.',e);return viaServer()}):viaServer()).then(d=>db=d)}
+    return ready}
   if(name==='sample')return AI_ENDPOINT?aiSample():null;
   return null}};
 })();
