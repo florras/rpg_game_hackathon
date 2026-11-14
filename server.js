@@ -3,6 +3,8 @@ const rateLimit = require('express-rate-limit');
 const Anthropic = require('@anthropic-ai/sdk');
 const { Pool } = require('pg');
 const crypto = require('crypto');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -36,6 +38,8 @@ async function initDb() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (id text PRIMARY KEY, email text UNIQUE NOT NULL, name text, pass text NOT NULL, dob text, parent_email text, created timestamptz DEFAULT now());
     CREATE TABLE IF NOT EXISTS sessions (token text PRIMARY KEY, user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires timestamptz NOT NULL);
+    CREATE TABLE IF NOT EXISTS kv (path text PRIMARY KEY, col text NOT NULL, id text NOT NULL, data jsonb NOT NULL, updated timestamptz DEFAULT now());
+    CREATE INDEX IF NOT EXISTS kv_col_idx ON kv (col);
     CREATE TABLE IF NOT EXISTS docs (user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE, name text NOT NULL, data jsonb NOT NULL, updated timestamptz DEFAULT now(), PRIMARY KEY (user_id, name));
   `);
 }
@@ -73,7 +77,69 @@ app.use('/api', (req, res, next) => { // block cross-site writes
   next();
 });
 const lim = { standardHeaders: true, legacyHeaders: false, message: { error: 'rate_limited' } };
-app.use('/api', rateLimit({ windowMs: 60e3, limit: 120, ...lim }));
+app.use('/api', rateLimit({ windowMs: 60e3, limit: 120, skip: (req) => req.path.startsWith('/kv/'), ...lim }));
+
+// ---------- shared store: profiles, friends, leaderboard, peer checks (works across devices) ----------
+// The front end talks to this like a tiny document database (see serverDb() in public/index.html).
+const KV_TOP = /^(data|players|friendreqs|verifications|peerlog)(\/|$)/;
+const okCol = (c) => typeof c === 'string' && c.length <= 200 && /^[A-Za-z0-9_-]+(\/[A-Za-z0-9_-]+)*$/.test(c) && KV_TOP.test(c);
+const okPath = (p) => okCol(p) && p.includes('/');
+const kvLimit = rateLimit({ windowMs: 60e3, limit: 1500, ...lim });
+const noStore = (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); };
+async function kvSet(path, data) {
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [path]);
+    // the profile list is shared by everyone: merge by profile id so two sign-ups at once never overwrite each other
+    if (/\/profiles$/.test(path) && data && Array.isArray(data.list)) {
+      const r = await c.query('SELECT data FROM kv WHERE path=$1', [path]);
+      const rem = r.rows[0] && Array.isArray(r.rows[0].data.list) ? r.rows[0].data.list : [];
+      const ids = new Set(data.list.map((x) => x && x.pid));
+      data = { list: data.list.concat(rem.filter((x) => x && !ids.has(x.pid))) };
+    }
+    const i = path.lastIndexOf('/');
+    await c.query('INSERT INTO kv (path,col,id,data) VALUES ($1,$2,$3,$4::jsonb) ON CONFLICT (path) DO UPDATE SET data=$4::jsonb, updated=now()', [path, path.slice(0, i), path.slice(i + 1), JSON.stringify(data)]);
+    await c.query('COMMIT');
+  } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
+}
+app.use('/api/kv', kvLimit, noStore);
+app.get('/api/kv/ping', async (_req, res) => { // open /api/kv/ping in a browser to check the shared store
+  try { const r = await pool.query('SELECT count(*)::int AS n FROM kv'); res.json({ ok: true, rows: r.rows[0].n }); }
+  catch (e) { console.error('kv ping', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+app.get('/api/kv/doc', async (req, res) => {
+  const p = String(req.query.p || ''); if (!okPath(p)) return res.status(400).json({ error: 'invalid' });
+  try { const r = await pool.query('SELECT data FROM kv WHERE path=$1', [p]); r.rows[0] ? res.json({ data: r.rows[0].data }) : res.status(404).json({ error: 'none' }); }
+  catch (e) { console.error('kv get', e.message); res.status(500).json({ error: 'server' }); }
+});
+app.put('/api/kv/doc', async (req, res) => {
+  const p = String(req.query.p || ''), d = req.body && req.body.data;
+  if (!okPath(p) || !d || typeof d !== 'object' || Array.isArray(d) || JSON.stringify(d).length > 1e6) return res.status(400).json({ error: 'invalid' });
+  try { await kvSet(p, d); res.json({ ok: true }); } catch (e) { console.error('kv set', e.message); res.status(500).json({ error: 'server' }); }
+});
+app.patch('/api/kv/doc', async (req, res) => {
+  const p = String(req.query.p || ''), d = req.body && req.body.data;
+  if (!okPath(p) || !d || typeof d !== 'object' || Array.isArray(d) || JSON.stringify(d).length > 1e6) return res.status(400).json({ error: 'invalid' });
+  try { const r = await pool.query('UPDATE kv SET data = data || $2::jsonb, updated=now() WHERE path=$1', [p, JSON.stringify(d)]); r.rowCount ? res.json({ ok: true }) : res.status(404).json({ error: 'none' }); }
+  catch (e) { console.error('kv update', e.message); res.status(500).json({ error: 'server' }); }
+});
+app.delete('/api/kv/doc', async (req, res) => {
+  const p = String(req.query.p || ''); if (!okPath(p)) return res.status(400).json({ error: 'invalid' });
+  try { await pool.query('DELETE FROM kv WHERE path=$1', [p]); res.json({ ok: true }); } catch (e) { console.error('kv del', e.message); res.status(500).json({ error: 'server' }); }
+});
+app.get('/api/kv/col', async (req, res) => {
+  const c = String(req.query.c || ''); if (!okCol(c)) return res.status(400).json({ error: 'invalid' });
+  let w = []; try { w = req.query.w ? JSON.parse(req.query.w) : []; } catch (e) { return res.status(400).json({ error: 'invalid' }); }
+  if (!Array.isArray(w) || w.length > 4) return res.status(400).json({ error: 'invalid' });
+  const params = [c]; let sql = 'SELECT id,data FROM kv WHERE col=$1';
+  for (const f of w) {
+    if (!Array.isArray(f) || f[1] !== '==' || !/^[A-Za-z0-9_]{1,30}$/.test(f[0]) || !['string', 'number', 'boolean'].includes(typeof f[2])) return res.status(400).json({ error: 'invalid' });
+    params.push(f[0], String(f[2])); sql += ` AND data->>$${params.length - 1} = $${params.length}`;
+  }
+  sql += ' LIMIT ' + Math.min(Number(req.query.limit) || 2000, 2000);
+  try { const r = await pool.query(sql, params); res.json({ docs: r.rows }); } catch (e) { console.error('kv col', e.message); res.status(500).json({ error: 'server' }); }
+});
 const authLimit = rateLimit({ windowMs: 15 * 60e3, limit: 20, ...lim });
 app.use('/api', auth);
 
@@ -151,6 +217,13 @@ app.post('/api/ai', async (req, res) => {
   }
 });
 
-app.use(express.static('public'));
+// find index.html in public/ (normal) or next to server.js (if it was uploaded to the wrong folder)
+const PUB = fs.existsSync(path.join(__dirname, 'public', 'index.html')) ? path.join(__dirname, 'public') : __dirname;
+console.log('Serving front end from', PUB, fs.existsSync(path.join(PUB, 'index.html')) ? '(index.html found)' : '(index.html MISSING)');
+app.use(express.static(PUB, { index: 'index.html', dotfiles: 'ignore' }));
+app.get('/', (_req, res) => {
+  const f = path.join(PUB, 'index.html');
+  fs.existsSync(f) ? res.sendFile(f) : res.status(500).send('index.html not found. It must be at public/index.html in your repo.');
+});
 initDb().then(() => app.listen(process.env.PORT || 3000, () => console.log('Questlog running')))
   .catch((e) => { console.error('Database setup failed:', e.message); process.exit(1); });

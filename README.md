@@ -14,6 +14,9 @@ Gamified quest tracker for students. Express + Postgres, static front end in `pu
 
 **Important:** in `public/index.html` keep `const AI_ENDPOINT = '/api/ai';`. If you paste in a version of the page that has `AI_ENDPOINT = ''`, the AI tutor, quest rating, quizzes and photo checks all stop working.
 
+## How data is shared
+Profiles, friend codes, the leaderboard and peer checks are stored in the Postgres `kv` table through `/api/kv/*` and shared across every device. If the database is unreachable the page falls back to saving on that one device only (friend codes will then not work for other people).
+
 ## Features
 Email + password accounts, progress synced to the database, AI tutor / quest rating / photo checks (signed-in only, capped per day), guest mode.
 
