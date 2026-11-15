@@ -15,6 +15,8 @@ services:
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
+      - key: MESSAGE_FILES
+        value: all
       - key: ADMIN_KEY
         generateValue: true
       - key: DATABASE_URL

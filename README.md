@@ -21,8 +21,10 @@ Profiles, friend codes, the leaderboard and peer checks are stored in the Postgr
 Friends can message each other from the Friends tab (💬 button next to a friend; the Friends menu item shows an unread count).
 - Text only, 500 characters, friends only, same age group only (under 18 with under 18, adults with adults)
 - Links, emails, phone numbers and other-app names are blocked; messages are deleted after 30 days
+- Files: the 📎 button (or paste / drag and drop) sends a photo, PDF, Word, PowerPoint, Excel or text file, up to 700 KB. Photos are shrunk before sending. Files are stored in the `msgfiles` collection, are read one at a time by their random id (never listed), and are deleted after 30 days with the messages.
+- Photos and text files are checked by the AI before they are saved. If it finds nudity, violence, drugs, bullying or personal details (address, phone number, ID, other-app handles), or if the check can't run, the file is not sent. PDFs and Office files can't be scanned. Set `MESSAGE_FILES=images` to allow only photos, or `MESSAGE_FILES=off` to turn files off. File checks count against your AI usage.
 - A Report button saves the last 10 messages to the `reports` collection. With the site database you can read reports at `/api/admin/reports` using the header `x-admin-key: <ADMIN_KEY>` (Render generates ADMIN_KEY for you in render.yaml)
-- **If you use Firebase** (FIREBASE_CONFIG is set), messages and reports live in Firestore collections `messages` and `reports`, and the server rules above don't apply. Your Firestore security rules must allow those two collections, and reports are read in the Firebase console.
+- **If you use Firebase** (FIREBASE_CONFIG is set), messages and reports live in Firestore collections `messages` and `reports`, and the server rules above don't apply. Your Firestore security rules must allow those collections (plus `msgfiles` for attachments; in Firebase mode the photo check runs in the browser, so it can be bypassed), and reports are read in the Firebase console.
 - Privacy: this app has no verified sign-in, so message privacy is only as strong as your database rules. Do not use messaging with real students until you add authenticated access (for example Firebase Anonymous Auth with rules that only let the sender and receiver read a message).
 
 ## Features
