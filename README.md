@@ -41,7 +41,7 @@ Email + password accounts, progress synced to the database, AI tutor / quest rat
 ## Navigation
 Six tabs: Home, Quests, Calendar, Tutor, Friends, Me. "Me" holds Profile, Achievements, Settings, Get the app and Log out.
 The focus timer opens from the ▶ button on any quest (starts a 25-minute session on that quest), the Home card, or the Quests tab.
-Keyboard shortcuts (desktop): `n` new quest, `1`-`6` switch tabs.
+Keyboard shortcuts (desktop): `n` new quest, `1`-`6` switch tabs, and ← / → change the month on the Calendar tab.
 
 ## Calendar sync (Canvas + Google Calendar)
 Calendar tab → "Connect Canvas / Google". Students paste an iCal link:
