@@ -5,6 +5,7 @@ const { Pool } = require('pg');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
+const { loadFeed } = require('./calendar');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -81,7 +82,7 @@ app.use('/api', rateLimit({ windowMs: 60e3, limit: 120, skip: (req) => req.path.
 
 // ---------- shared store: profiles, friends, leaderboard, peer checks (works across devices) ----------
 // The front end talks to this like a tiny document database (see serverDb() in public/index.html).
-const KV_TOP = /^(data|players|friendreqs|verifications|peerlog)(\/|$)/;
+const KV_TOP = /^(data|players|friendreqs|verifications|peerlog|messages|reports)(\/|$)/;
 const okCol = (c) => typeof c === 'string' && c.length <= 200 && /^[A-Za-z0-9_-]+(\/[A-Za-z0-9_-]+)*$/.test(c) && KV_TOP.test(c);
 const okPath = (p) => okCol(p) && p.includes('/');
 const kvLimit = rateLimit({ windowMs: 60e3, limit: 1500, ...lim });
@@ -103,7 +104,49 @@ async function kvSet(path, data) {
     await c.query('COMMIT');
   } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
 }
-app.use('/api/kv', kvLimit, noStore);
+// ---------- friend messages: safety rules (messages + reports) ----------
+const ADMIN_KEY = process.env.ADMIN_KEY || '';
+const badText = (t) => typeof t !== 'string' || !t.trim() || t.length > 500
+  || /(https?:\/\/|www\.|\b[a-z0-9-]+\.(com|net|org|io|gg|me|co|ly|app|xyz)\b)/i.test(t)
+  || /\S+@\S+\.\S+/.test(t) || /(\d[\s().-]*){8,}/.test(t)
+  || /\b(snap(chat)?|insta(gram)?|discord|tiktok|whatsapp|telegram|kik|signal)\b/i.test(t);
+const msgRate = new Map();
+const topOf = (s) => String(s || '').split('/')[0];
+async function kvRules(req, res, next) {
+  const top = topOf(req.query.p || req.query.c);
+  if (top === 'reports') { // reports are write-only from the app; read them via /api/admin/reports
+    if (req.method !== 'PUT') return res.status(403).json({ error: 'forbidden' });
+  }
+  if (top === 'messages') {
+    if (req.method === 'PATCH') return res.status(403).json({ error: 'forbidden' });
+    if (req.method === 'GET' && req.path === '/col') { // no bulk reads: a query must be limited to one person's messages
+      let w = []; try { w = req.query.w ? JSON.parse(req.query.w) : []; } catch (e) { return res.status(400).json({ error: 'invalid' }); }
+      if (!w.some((f) => Array.isArray(f) && ['th', 'to', 'from'].includes(f[0]))) return res.status(403).json({ error: 'forbidden' });
+    }
+    if (req.method === 'GET' && req.path === '/doc') return res.status(403).json({ error: 'forbidden' });
+    if (req.method === 'PUT') {
+      const d = req.body && req.body.data;
+      if (!d || typeof d.from !== 'string' || typeof d.to !== 'string' || typeof d.th !== 'string' || d.from === d.to || badText(d.text)) return res.status(400).json({ error: 'rejected' });
+      const n = (msgRate.get(d.from) || []).filter((x) => Date.now() - x < 60e3);
+      if (n.length >= 15) return res.status(429).json({ error: 'rate_limited' });
+      n.push(Date.now()); msgRate.set(d.from, n); if (msgRate.size > 5000) msgRate.clear();
+      try { // only accepted friends can message each other
+        const r = await pool.query("SELECT 1 FROM kv WHERE path = ANY($1) AND data->>'status'='accepted'", [['friendreqs/' + d.from + '_' + d.to, 'friendreqs/' + d.to + '_' + d.from]]);
+        if (!r.rowCount) return res.status(403).json({ error: 'not_friends' });
+      } catch (e) { return res.status(500).json({ error: 'server' }); }
+    }
+  }
+  next();
+}
+app.use('/api/kv', kvLimit, noStore, kvRules);
+app.get('/api/admin/reports', async (req, res) => { // see reports: /api/admin/reports with header x-admin-key
+  if (!ADMIN_KEY || req.headers['x-admin-key'] !== ADMIN_KEY) return res.status(403).json({ error: 'forbidden' });
+  const r = await pool.query("SELECT id,data,updated FROM kv WHERE col='reports' ORDER BY updated DESC LIMIT 200");
+  res.json({ reports: r.rows });
+});
+setInterval(() => { // keep messages for 30 days and reports for 90
+  pool.query("DELETE FROM kv WHERE (col='messages' AND updated < now() - interval '30 days') OR (col='reports' AND updated < now() - interval '90 days')").catch(() => {});
+}, 60 * 60e3);
 app.get('/api/kv/ping', async (_req, res) => { // open /api/kv/ping in a browser to check the shared store
   try { const r = await pool.query('SELECT count(*)::int AS n FROM kv'); res.json({ ok: true, rows: r.rows[0].n }); }
   catch (e) { console.error('kv ping', e.message); res.status(500).json({ ok: false, error: e.message }); }
@@ -139,6 +182,18 @@ app.get('/api/kv/col', async (req, res) => {
   }
   sql += ' LIMIT ' + Math.min(Number(req.query.limit) || 2000, 2000);
   try { const r = await pool.query(sql, params); res.json({ docs: r.rows }); } catch (e) { console.error('kv col', e.message); res.status(500).json({ error: 'server' }); }
+});
+// ---------- calendar sync: Canvas / Google Calendar / any iCal feed ----------
+// The page sends the feed link here; the server downloads it (public https hosts only) and returns events.
+const calLimit = rateLimit({ windowMs: 60e3, limit: 30, ...lim });
+app.get('/api/ical', calLimit, noStore, async (req, res) => {
+  const url = String(req.query.url || '');
+  if (!url || url.length > 2000) return res.status(400).json({ error: 'bad_url' });
+  try { res.json({ events: await loadFeed(url) }); }
+  catch (e) {
+    if (!e.code) console.error('ical', e.message);
+    res.status(e.status || 502).json({ error: e.code || 'feed_error' });
+  }
 });
 const authLimit = rateLimit({ windowMs: 15 * 60e3, limit: 20, ...lim });
 app.use('/api', auth);
