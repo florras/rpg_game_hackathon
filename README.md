@@ -17,6 +17,14 @@ Gamified quest tracker for students. Express + Postgres, static front end in `pu
 ## How data is shared
 Profiles, friend codes, the leaderboard and peer checks are stored in the Postgres `kv` table through `/api/kv/*` and shared across every device. If the database is unreachable the page falls back to saving on that one device only (friend codes will then not work for other people).
 
+## Ask for help
+Every quest has an "Ask for help" button (the ? icon on Home). It works like peer verification:
+- The student can add a short note on what they're stuck on, then either ask their friends or ask Sage straight away.
+- Friends in the same age group see "Maya needs help with …" on Home and the Quests tab, with "I can help" or "Not now".
+- "I can help" opens a chat with a friendly first message ready to send, and the student gets a notification. They can message the helper and mark it solved.
+- Requests are stored in the `helpreqs` collection. The server only lets a friend of the person asking claim a request, blocks links and phone numbers in the note, allows 10 requests an hour, and deletes them after 14 days (they're hidden after 7). Completing or deleting the quest closes the request.
+- With Firebase, allow the `helpreqs` collection in your Firestore rules.
+
 ## Friend messages
 Friends can message each other from the Friends tab (💬 button next to a friend; the Friends menu item shows an unread count).
 - Text only, 500 characters, friends only, same age group only (under 18 with under 18, adults with adults)

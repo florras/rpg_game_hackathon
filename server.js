@@ -82,7 +82,7 @@ app.use('/api', rateLimit({ windowMs: 60e3, limit: 120, skip: (req) => req.path.
 
 // ---------- shared store: profiles, friends, leaderboard, peer checks (works across devices) ----------
 // The front end talks to this like a tiny document database (see serverDb() in public/index.html).
-const KV_TOP = /^(data|players|friendreqs|verifications|peerlog|messages|msgfiles|reports)(\/|$)/;
+const KV_TOP = /^(data|players|friendreqs|verifications|peerlog|messages|msgfiles|helpreqs|reports)(\/|$)/;
 const okCol = (c) => typeof c === 'string' && c.length <= 200 && /^[A-Za-z0-9_-]+(\/[A-Za-z0-9_-]+)*$/.test(c) && KV_TOP.test(c);
 const okPath = (p) => okCol(p) && p.includes('/');
 const kvLimit = rateLimit({ windowMs: 60e3, limit: 1500, ...lim });
@@ -117,7 +117,7 @@ const IMG_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
 const TXT_TYPES = ['text/plain', 'text/markdown', 'text/csv'];
 const DOC_TYPES = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'];
 const fileTypeOk = (t) => FILE_MODE !== 'off' && (IMG_TYPES.includes(t) || (FILE_MODE === 'all' && (TXT_TYPES.includes(t) || DOC_TYPES.includes(t))));
-const fileRate = new Map();
+const fileRate = new Map(), helpRate = new Map();
 async function areFriends(a, b) {
   const r = await pool.query("SELECT 1 FROM kv WHERE path = ANY($1) AND data->>'status'='accepted'", [['friendreqs/' + a + '_' + b, 'friendreqs/' + b + '_' + a]]);
   return r.rowCount > 0;
@@ -154,6 +154,24 @@ async function kvRules(req, res, next) {
       catch (e) { console.error('file check', e.message); return res.status(503).json({ error: 'file_check_unavailable' }); }
     }
   }
+  if (top === 'helpreqs') { // "ask for help" requests: friends can see them and one friend can offer to help
+    const d = req.body && req.body.data;
+    if (req.method === 'PUT') {
+      if (!d || typeof d.hid !== 'string' || typeof d.by !== 'string' || d.status !== 'open' || typeof d.quest !== 'string' || !d.quest.trim() || d.quest.length > 80 || badText(d.quest)
+        || (d.note != null && (typeof d.note !== 'string' || d.note.length > 200 || (d.note.trim() !== '' && badText(d.note))))) return res.status(400).json({ error: 'rejected' });
+      const n = (helpRate.get(d.by) || []).filter((x) => Date.now() - x < 60 * 60e3);
+      if (n.length >= 10) return res.status(429).json({ error: 'rate_limited' });
+      n.push(Date.now()); helpRate.set(d.by, n); if (helpRate.size > 5000) helpRate.clear();
+    }
+    if (req.method === 'PATCH') { // only "I can help" is allowed, and only from a friend of the person asking
+      const keys = Object.keys(d || {});
+      if (!keys.length || keys.some((k) => !['status', 'helper', 'helperName', 'claimedAt'].includes(k)) || d.status !== 'claimed' || typeof d.helper !== 'string') return res.status(403).json({ error: 'forbidden' });
+      try { const r = await pool.query('SELECT data FROM kv WHERE path=$1', [String(req.query.p || '')]); const h = r.rows[0] && r.rows[0].data;
+        if (!h) return res.status(404).json({ error: 'none' });
+        if (h.by === d.helper || !(await areFriends(h.by, d.helper))) return res.status(403).json({ error: 'not_friends' }); }
+      catch (e) { return res.status(500).json({ error: 'server' }); }
+    }
+  }
   if (top === 'messages') {
     if (req.method === 'PATCH') return res.status(403).json({ error: 'forbidden' });
     if (req.method === 'GET' && req.path === '/col') { // no bulk reads: a query must be limited to one person's messages
@@ -188,7 +206,7 @@ app.get('/api/admin/reports', async (req, res) => { // see reports: /api/admin/r
   res.json({ reports: r.rows });
 });
 setInterval(() => { // keep messages and their files for 30 days and reports for 90
-  pool.query("DELETE FROM kv WHERE (col IN ('messages','msgfiles') AND updated < now() - interval '30 days') OR (col='reports' AND updated < now() - interval '90 days')").catch(() => {});
+  pool.query("DELETE FROM kv WHERE (col IN ('messages','msgfiles') AND updated < now() - interval '30 days') OR (col='helpreqs' AND updated < now() - interval '14 days') OR (col='reports' AND updated < now() - interval '90 days')").catch(() => {});
 }, 60 * 60e3);
 app.get('/api/kv/ping', async (_req, res) => { // open /api/kv/ping in a browser to check the shared store
   try { const r = await pool.query('SELECT count(*)::int AS n FROM kv'); res.json({ ok: true, rows: r.rows[0].n }); }
